@@ -5,8 +5,9 @@
 #include <initguid.h> 
 
 
-DEFINE_GUID(CLSID_IEventHandler, 0xb5b3d8f, 0x574c, 0x4fa3,
-	0x90, 0x10, 0x25, 0xb8, 0xe4, 0xce, 0x24, 0xc2);
+IWebBrowser2* pWebBrowser = 0;
+BSTR          HtmlURL;
+HWND          gHwnd = 0;
 
 DEFINE_GUID(IID_IEventHandler, 0x74666cad, 0xc2b1, 0x4fa8,
 	0xa0, 0x49, 0x97, 0xf3, 0x21, 0x48, 0x2, 0xf0);
@@ -16,11 +17,9 @@ DEFINE_GUID(IID_IEventHandler, 0x74666cad, 0xc2b1, 0x4fa8,
 #define INTERFACE IEventHandler
 DECLARE_INTERFACE_(INTERFACE, DWebBrowserEvents2)
 {
-	// IUnkown function
 	STDMETHOD(QueryInterface)(THIS_ REFIID, void**) PURE;
 	STDMETHOD_(ULONG, AddRef)(THIS) PURE;
 	STDMETHOD_(ULONG, Release)(THIS) PURE;
-	// IDispatch function
 	STDMETHOD_(ULONG, GetTypeInfoCount)(THIS_ UINT*) PURE;
 	STDMETHOD_(ULONG, GetTypeInfo)(THIS_ UINT, LCID, ITypeInfo**) PURE;
 	STDMETHOD_(ULONG, GetIDsOfNames)(THIS_ REFIID, LPOLESTR*, UINT,
@@ -102,12 +101,13 @@ HRESULT STDMETHODCALLTYPE EvtInvoke(void* this,
 	if (!IsEqualIID(riid, &IID_NULL)) 
 		return DISP_E_UNKNOWNINTERFACE; 
 
-	BSTR HtmlURL;
 	if (dispIdMember == DISPID_NEWWINDOW2) {
+		IDispatch* pIDispatch;
+		pWebBrowser->lpVtbl->get_Application(pWebBrowser ,&pIDispatch);
+		*(pDispParams->rgvarg[1].ppdispVal) = pIDispatch;
 	}
-	if (dispIdMember == DISPID_BEFORENAVIGATE2) { 
-		IWebBrowser2* pSite = (IWebBrowser2*)pDispParams->rgvarg[6].pdispVal;
-		pSite->lpVtbl->get_LocationURL(pSite, &HtmlURL);
+	if (dispIdMember == DISPID_NAVIGATECOMPLETE2) {
+		pWebBrowser->lpVtbl->get_LocationURL(pWebBrowser, &HtmlURL);
 	}
 	return S_OK;
 }
@@ -253,6 +253,7 @@ typedef struct _IOleInPlaceFrameEx {
 	IOleInPlaceFrame	frame;		
 	HWND				window;
 } IOleInPlaceFrameEx;
+
 
 
 HRESULT STDMETHODCALLTYPE SiteQueryInterface(IOleClientSite FAR* This, REFIID riid, void ** ppvObject);
@@ -641,20 +642,20 @@ void ReleaseBrowserObject(HWND hwnd)
 void ConnectEventSink(IWebBrowser2* pSite,IEventHandler* pEventHandler)
 {
 	HRESULT hr;
-	IConnectionPointContainer* pCPC;
-	IConnectionPoint*          pCP;
+	IConnectionPointContainer* pConnectionPointCont;
+	IConnectionPoint*          pConnectionPoint;
 	if (pSite)
 	{
-		hr = pSite->lpVtbl->QueryInterface(pSite, &IID_IConnectionPointContainer, (void**)&pCPC);
+		hr = pSite->lpVtbl->QueryInterface(pSite, &IID_IConnectionPointContainer, (void**)&pConnectionPointCont);
 		if (FAILED(hr))
 			return; 
-		hr = pCPC->lpVtbl->FindConnectionPoint(pCPC, &DIID_DWebBrowserEvents2, &pCP);
+		hr = pConnectionPointCont->lpVtbl->FindConnectionPoint(pConnectionPointCont, &DIID_DWebBrowserEvents2, &pConnectionPoint);
 		if (FAILED(hr)) { 
-			pCPC->lpVtbl->Release(pCPC);
+			pConnectionPointCont->lpVtbl->Release(pConnectionPointCont);
 			return;
 		}
 		DWORD adviseCookie = 0;
-		hr = pCP->lpVtbl->Advise(pCP, (IUnknown*)pEventHandler, &adviseCookie);
+		hr = pConnectionPoint->lpVtbl->Advise(pConnectionPoint, (IUnknown*)pEventHandler, &adviseCookie);
 	}
 }
 
@@ -662,14 +663,15 @@ long Navigate(HWND hwnd, LPCTSTR string, IEventHandler* pEventHandler)
 {	
 	IWebBrowser2	*webBrowser2;
 	IOleObject		*browserObject;
-	VARIANT			myURL;
 	BSTR			bstr;
+	VARIANT	        myURL;
+
 
 	browserObject = *((IOleObject **)GetWindowLong(hwnd, GWL_USERDATA));
 
 	bstr = 0;
 
-	if (!browserObject->lpVtbl->QueryInterface(browserObject, &IID_IWebBrowser2, (void**)&webBrowser2))
+	if (SUCCEEDED(browserObject->lpVtbl->QueryInterface(browserObject, &IID_IWebBrowser2, (void**)&webBrowser2)))
 	{
 		VariantInit(&myURL);
 		myURL.vt = VT_BSTR;
@@ -691,28 +693,24 @@ void DisplayHTMLPage(HWND hwnd, LPTSTR webPageName)
 
 	browserObject = *((IOleObject **)GetWindowLong(hwnd, GWL_USERDATA));
 
-	if (!browserObject->lpVtbl->QueryInterface(browserObject, &IID_IWebBrowser2, (void**)&webBrowser2))
+	if (SUCCEEDED(browserObject->lpVtbl->QueryInterface(browserObject, &IID_IWebBrowser2, (void**)&webBrowser2)))
 	{
 		VariantInit(&myURL);
 		myURL.vt = VT_BSTR;
-
-#ifndef UNICODE
-		{
 		wchar_t		*buffer;
 		DWORD		size;
 
 		size = MultiByteToWideChar(CP_ACP, 0, webPageName, -1, 0, 0);
-		if (!(buffer = (wchar_t *)GlobalAlloc(GMEM_FIXED, sizeof(wchar_t) * size))) goto badalloc;
+		if (!(buffer = (wchar_t*)GlobalAlloc(GMEM_FIXED, sizeof(wchar_t) * size))) goto release;
+		webBrowser2->lpVtbl->Release(webBrowser2);
+
 		MultiByteToWideChar(CP_ACP, 0, webPageName, -1, buffer, size);
 		myURL.bstrVal = SysAllocString(buffer);
 		GlobalFree(buffer);
-		}
-#else
-		myURL.bstrVal = SysAllocString(webPageName);
-#endif
 		if (!myURL.bstrVal)
 		{
-badalloc:	webBrowser2->lpVtbl->Release(webBrowser2);
+		release:
+			webBrowser2->lpVtbl->Release(webBrowser2);
 			return ;
 		}
 
@@ -720,13 +718,12 @@ badalloc:	webBrowser2->lpVtbl->Release(webBrowser2);
 		VariantClear(&myURL);
 		webBrowser2->lpVtbl->Release(webBrowser2);
 	}
-
-	return ;
 }
+
+
 void CreateBrowserObject(HWND hwnd)
 {
 	IOleObject			*browserObject;
-	IWebBrowser2		*webBrowser2;
 	RECT				rect;
 	char				*ptr;
 	IOleInPlaceFrameEx	*iOleInPlaceFrameEx;
@@ -747,7 +744,7 @@ void CreateBrowserObject(HWND hwnd)
 
 	_iOleClientSiteEx->inplace.frame = iOleInPlaceFrameEx;
 
-	if (!OleCreate(&CLSID_WebBrowser, &IID_IOleObject, OLERENDER_DRAW, 0, (IOleClientSite *)_iOleClientSiteEx, &MyIStorage, (void**)&browserObject))
+	if (SUCCEEDED(OleCreate(&CLSID_WebBrowser, &IID_IOleObject, OLERENDER_DRAW, 0, (IOleClientSite *)_iOleClientSiteEx, &MyIStorage, (void**)&browserObject)))
 	{
 		*((IOleObject **)ptr) = browserObject;
 		SetWindowLong(hwnd, GWL_USERDATA, (LONG)ptr);
@@ -755,15 +752,14 @@ void CreateBrowserObject(HWND hwnd)
 
 		GetClientRect(hwnd, &rect);
 
-		if (!OleSetContainedObject((struct IUnknown *)browserObject, TRUE) &&
-			!browserObject->lpVtbl->DoVerb(browserObject, OLEIVERB_SHOW, NULL, (IOleClientSite *)_iOleClientSiteEx, -1, hwnd, &rect) &&
-			!browserObject->lpVtbl->QueryInterface(browserObject, &IID_IWebBrowser2, (void**)&webBrowser2))
+		if (SUCCEEDED(OleSetContainedObject((struct IUnknown *)browserObject, TRUE)) &&
+			SUCCEEDED(browserObject->lpVtbl->DoVerb(browserObject, OLEIVERB_SHOW, NULL, (IOleClientSite *)_iOleClientSiteEx, -1, hwnd, &rect)) &&
+			SUCCEEDED(browserObject->lpVtbl->QueryInterface(browserObject, &IID_IWebBrowser2, (void**)&pWebBrowser)))
 		{
-			webBrowser2->lpVtbl->put_Left(webBrowser2, 0);
-			webBrowser2->lpVtbl->put_Top(webBrowser2, 0);
-			webBrowser2->lpVtbl->put_Width(webBrowser2, rect.right);
-			webBrowser2->lpVtbl->put_Height(webBrowser2, rect.bottom);
-			webBrowser2->lpVtbl->Release(webBrowser2);
+			pWebBrowser->lpVtbl->put_Left(pWebBrowser, 0);
+			pWebBrowser->lpVtbl->put_Top(pWebBrowser, 0);
+			pWebBrowser->lpVtbl->put_Width(pWebBrowser, rect.right);
+			pWebBrowser->lpVtbl->put_Height(pWebBrowser, rect.bottom);
 			return;
 		}
 		ReleaseBrowserObject(hwnd);
@@ -780,7 +776,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	{
 		CreateBrowserObject(hwnd);
 		++wndCount;
-		return(0);
+		return 0;
 	}
 
 	if (uMsg == WM_DESTROY)
@@ -790,14 +786,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		if (!wndCount)
 			PostQuitMessage(0);
 
-		return(TRUE);
+		return 1;
 	}
 
 	return(DefWindowProc(hwnd, uMsg, wParam, lParam));
 }
 
 
-int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hInstNULL, LPSTR lpszCmdLine, int nCmdShow)
+INT WINAPI wWinMain(_In_ HINSTANCE hInstance,_In_opt_ HINSTANCE hPrevInstance,_In_ LPWSTR lpCmdLine,	_In_ int nShowCmd)
 {
 	MSG			msg;
 	if (OleInitialize(NULL) == S_OK)
@@ -821,8 +817,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hInstNULL, LPSTR lpszCmdLine
 							CW_USEDEFAULT, 0, CW_USEDEFAULT, 0,
 							HWND_DESKTOP, NULL, hInstance, 0)))
 		{
+			gHwnd = msg.hwnd;
 			Navigate(msg.hwnd, "<H2>HTML Test</H2>", eventHandler);
-			ShowWindow(msg.hwnd, nCmdShow);
+			ShowWindow(msg.hwnd, nShowCmd);
 			UpdateWindow(msg.hwnd);
 		}
 
@@ -831,6 +828,8 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hInstNULL, LPSTR lpszCmdLine
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
 		}
+		if(pWebBrowser)
+			pWebBrowser->lpVtbl->Release(pWebBrowser);
 		OleUninitialize();
 
 		return 0;
